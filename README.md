@@ -1,93 +1,164 @@
+import pygame
 import sounddevice as sd
 import numpy as np
-from pygame import *
 from random import randint
 
-# ===== AUDIO =====
+# ========= AUDIO =========
 sr = 16000
 block = 256
 mic_level = 0.0
+last_mic = 0.0
+audio_ok = True
+
 
 def audio_cb(indata, frames, time, status):
     global mic_level
     if status:
         return
-    rms = float(np.sqrt(np.mean(indata**2)))
+    rms = float(np.sqrt(np.mean(indata ** 2)))
     mic_level = 0.85 * mic_level + 0.15 * rms
 
-init()
-window_size = 1200, 800
-window = display.set_mode(window_size)
-clock = time.Clock()
 
-player_rect = Rect(150, 300, 100, 100)
+try:
+    sd.default.samplerate = sr
+    sd.default.channels = 1
+    stream = sd.InputStream(blocksize=block, callback=audio_cb)
+    stream.start()
+except Exception as e:
+    print("Audio disabled:", e)
+    audio_ok = False
 
-def generate_pipes(count, pipe_width=140, gap=280,
-                   min_height=50, max_height=450, distance=500):
+
+# ========= PYGAME =========
+pygame.init()
+W, H = 1200, 800
+win = pygame.display.set_mode((W, H))
+pygame.display.set_caption("Voice Flappy")
+clock = pygame.time.Clock()
+
+# ========= IMAGES =========
+bg_img = pygame.image.load("background.png").convert()
+bg_img = pygame.transform.scale(bg_img, (W, H))
+
+player_img = pygame.image.load("icon.png").convert_alpha()
+player_img = pygame.transform.scale(player_img, (80, 80))
+
+pipe_top_img = pygame.image.load("pipe_top.png").convert_alpha()
+pipe_bottom_img = pygame.image.load("pipe_bottom.png").convert_alpha()
+
+# ========= PLAYER =========
+player = pygame.Rect(150, H // 2 - 40, 80, 80)
+
+# ========= PIPES =========
+PIPE_W = 120
+GAP = 260
+
+
+def gen_pipes(n):
     pipes = []
-    start_x = window_size[0]
-
-    for i in range(count):
-        height = randint(min_height, max_height)
-        top_pipe = Rect(start_x, 0, pipe_width, height)
-        bottom_pipe = Rect(
-            start_x,
-            height + gap,
-            pipe_width,
-            window_size[1] - (height + gap)
-        )
-        pipes.append([top_pipe, bottom_pipe])
-        start_x += distance
-
+    x = W
+    for _ in range(n):
+        h = randint(100, 420)
+        pipes.append(pygame.Rect(x, 0, PIPE_W, h))
+        pipes.append(pygame.Rect(x, h + GAP, PIPE_W, H - h - GAP))
+        x += 500
     return pipes
 
-pies = generate_pipes(150)
 
-main_font = font.Font(None, 100)
+pipes = gen_pipes(6)
+
+# ========= GAME =========
+font = pygame.font.Font(None, 80)
 score = 0
 lose = False
-wait = 40
-y_vel = 0.0
+
+y_vel = 0
 gravity = 0.6
+IMPULSE = -9
 THRESH = 0.001
-IMPULSE = -8.0
+MAX_FALL = 12
 
-# Тримаємо відкритим аудіо-потік, а всередині крутиться гра
-with sd.InputStream(samplerate=sr, channels=1, blocksize=block, callback=audio_cb):
-    while True:
-        for e in event.get():
-            if e.type == QUIT:
-                quit()
 
-        # логіка руху
-        # якщо голос гучніший за поріг — робимо "стрибок"
-        if mic_level > THRESH:
+def reset():
+    global pipes, score, lose, y_vel
+    pipes = gen_pipes(6)
+    score = 0
+    lose = False
+    y_vel = 0
+    player.y = H // 2 - 40
+
+
+# ========= LOOP =========
+run = True
+while run:
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT:
+            run = False
+
+    # === INPUT ===
+    if audio_ok:
+        if mic_level > THRESH and last_mic <= THRESH and not lose:
+            y_vel = IMPULSE
+        last_mic = mic_level
+    else:
+        if pygame.key.get_pressed()[pygame.K_SPACE] and not lose:
             y_vel = IMPULSE
 
+    # === PHYSICS ===
+    if not lose:
         y_vel += gravity
-        player_rect.y += int(y_vel)
+        y_vel = min(y_vel, MAX_FALL)
+        player.y += int(y_vel)
 
-        window.fill('sky blue')
-        draw.rect(window, 'red', player_rect)
+    if player.top < 0:
+        player.top = 0
+        y_vel = 0
 
-        for pie in pies[:]:
-            if not lose:
-                pie.x -= 10
-            draw.rect(window, 'green', pie)
-            if pie.x <= -100:
-        pies.remove(pie)
-    score += 0.5
+    if player.bottom > H:
+        player.bottom = H
+        lose = True
 
-if player_rect.colliderect(pie):
-    lose = True
+    # ========= DRAW =========
+    win.blit(bg_img, (0, 0))
+    win.blit(player_img, player)
 
-if len(pies) < 8:
-    pies += generate_pipes(150)
+    for p in pipes[:]:
+        if not lose:
+            p.x -= 8
 
-score_text = main_font.render(f'{int(score)}', 1, 'black')
-window.blit(
-    score_text,
-    (window_size[0]//2 - score_text.get_rect().w//2, 40)
-)
+        if p.top == 0:
+            img = pygame.transform.scale(pipe_top_img, (p.width, p.height))
+        else:
+            img = pygame.transform.scale(pipe_bottom_img, (p.width, p.height))
 
-            
+        win.blit(img, (p.x, p.y))
+
+        if p.right < 0:
+            pipes.remove(p)
+            if p.top == 0:
+                score += 1
+
+        if player.colliderect(p):
+            lose = True
+
+    if len(pipes) < 6:
+        pipes += gen_pipes(2)
+
+    txt = font.render(str(score), True, (0, 0, 0))
+    win.blit(txt, (W // 2 - txt.get_width() // 2, 30))
+
+    if lose:
+        t = font.render("PRESS R", True, (0, 0, 0))
+        win.blit(t, (W // 2 - t.get_width() // 2, H // 2))
+
+    pygame.display.update()
+    clock.tick(60)
+
+    if pygame.key.get_pressed()[pygame.K_r] and lose:
+        reset()
+
+pygame.quit()
+
+if audio_ok:
+    stream.stop()
+    stream.close()
